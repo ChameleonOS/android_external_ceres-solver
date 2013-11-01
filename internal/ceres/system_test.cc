@@ -64,21 +64,21 @@ const bool kUserOrdering = false;
 // Struct used for configuring the solver.
 struct SolverConfig {
   SolverConfig(LinearSolverType linear_solver_type,
-               SparseLinearAlgebraLibraryType sparse_linear_algebra_library,
+               SparseLinearAlgebraLibraryType sparse_linear_algebra_library_type,
                bool use_automatic_ordering)
       : linear_solver_type(linear_solver_type),
-        sparse_linear_algebra_library(sparse_linear_algebra_library),
+        sparse_linear_algebra_library_type(sparse_linear_algebra_library_type),
         use_automatic_ordering(use_automatic_ordering),
         preconditioner_type(IDENTITY),
         num_threads(1) {
   }
 
   SolverConfig(LinearSolverType linear_solver_type,
-               SparseLinearAlgebraLibraryType sparse_linear_algebra_library,
+               SparseLinearAlgebraLibraryType sparse_linear_algebra_library_type,
                bool use_automatic_ordering,
                PreconditionerType preconditioner_type)
       : linear_solver_type(linear_solver_type),
-        sparse_linear_algebra_library(sparse_linear_algebra_library),
+        sparse_linear_algebra_library_type(sparse_linear_algebra_library_type),
         use_automatic_ordering(use_automatic_ordering),
         preconditioner_type(preconditioner_type),
         num_threads(1) {
@@ -88,14 +88,14 @@ struct SolverConfig {
     return StringPrintf(
         "(%s, %s, %s, %s, %d)",
         LinearSolverTypeToString(linear_solver_type),
-        SparseLinearAlgebraLibraryTypeToString(sparse_linear_algebra_library),
+        SparseLinearAlgebraLibraryTypeToString(sparse_linear_algebra_library_type),
         use_automatic_ordering ? "AUTOMATIC" : "USER",
         PreconditionerTypeToString(preconditioner_type),
         num_threads);
   }
 
   LinearSolverType linear_solver_type;
-  SparseLinearAlgebraLibraryType sparse_linear_algebra_library;
+  SparseLinearAlgebraLibraryType sparse_linear_algebra_library_type;
   bool use_automatic_ordering;
   PreconditionerType preconditioner_type;
   int num_threads;
@@ -121,7 +121,7 @@ void RunSolversAndCheckTheyMatch(const vector<SolverConfig>& configurations,
                                  const double max_abs_difference) {
   int num_configurations = configurations.size();
   vector<SystemTestProblem*> problems;
-  vector<Solver::Summary> summaries(num_configurations);
+  vector<vector<double> > final_residuals(num_configurations);
 
   for (int i = 0; i < num_configurations; ++i) {
     SystemTestProblem* system_test_problem = new SystemTestProblem();
@@ -130,12 +130,11 @@ void RunSolversAndCheckTheyMatch(const vector<SolverConfig>& configurations,
 
     Solver::Options& options = *(system_test_problem->mutable_solver_options());
     options.linear_solver_type = config.linear_solver_type;
-    options.sparse_linear_algebra_library =
-        config.sparse_linear_algebra_library;
+    options.sparse_linear_algebra_library_type =
+        config.sparse_linear_algebra_library_type;
     options.preconditioner_type = config.preconditioner_type;
     options.num_threads = config.num_threads;
     options.num_linear_solver_threads = config.num_threads;
-    options.return_final_residuals = true;
 
     if (config.use_automatic_ordering) {
       delete options.linear_solver_ordering;
@@ -145,11 +144,20 @@ void RunSolversAndCheckTheyMatch(const vector<SolverConfig>& configurations,
     LOG(INFO) << "Running solver configuration: "
               << config.ToString();
 
+    Solver::Summary summary;
     Solve(options,
           system_test_problem->mutable_problem(),
-          &summaries[i]);
+          &summary);
 
-    CHECK_NE(summaries[i].termination_type, ceres::NUMERICAL_FAILURE)
+    system_test_problem
+        ->mutable_problem()
+        ->Evaluate(Problem::EvaluateOptions(),
+                   NULL,
+                   &final_residuals[i],
+                   NULL,
+                   NULL);
+
+    CHECK_NE(summary.termination_type, ceres::NUMERICAL_FAILURE)
         << "Solver configuration " << i << " failed.";
     problems.push_back(system_test_problem);
 
@@ -161,8 +169,8 @@ void RunSolversAndCheckTheyMatch(const vector<SolverConfig>& configurations,
     // the same residuals at two completely different positions in
     // parameter space.
     if (i > 0) {
-      const vector<double>& reference_residuals = summaries[0].final_residuals;
-      const vector<double>& current_residuals = summaries[i].final_residuals;
+      const vector<double>& reference_residuals = final_residuals[0];
+      const vector<double>& current_residuals = final_residuals[i];
 
       for (int j = 0; j < reference_residuals.size(); ++j) {
         EXPECT_NEAR(current_residuals[j],
@@ -273,9 +281,9 @@ class PowellsFunction {
 
 TEST(SystemTest, PowellsFunction) {
   vector<SolverConfig> configs;
-#define CONFIGURE(linear_solver, sparse_linear_algebra_library, ordering) \
-  configs.push_back(SolverConfig(linear_solver,                           \
-                                 sparse_linear_algebra_library,           \
+#define CONFIGURE(linear_solver, sparse_linear_algebra_library_type, ordering) \
+  configs.push_back(SolverConfig(linear_solver,                         \
+                                 sparse_linear_algebra_library_type,    \
                                  ordering))
 
   CONFIGURE(DENSE_QR,               SUITE_SPARSE, kAutomaticOrdering);
@@ -477,9 +485,9 @@ class BundleAdjustmentProblem {
 TEST(SystemTest, BundleAdjustmentProblem) {
   vector<SolverConfig> configs;
 
-#define CONFIGURE(linear_solver, sparse_linear_algebra_library, ordering, preconditioner) \
+#define CONFIGURE(linear_solver, sparse_linear_algebra_library_type, ordering, preconditioner) \
   configs.push_back(SolverConfig(linear_solver,                         \
-                                 sparse_linear_algebra_library,         \
+                                 sparse_linear_algebra_library_type,    \
                                  ordering,                              \
                                  preconditioner))
 
@@ -501,17 +509,19 @@ TEST(SystemTest, BundleAdjustmentProblem) {
 
   CONFIGURE(CGNR,                   SUITE_SPARSE, kAutomaticOrdering, JACOBI);
   CONFIGURE(ITERATIVE_SCHUR,        SUITE_SPARSE, kUserOrdering,      JACOBI);
+  CONFIGURE(ITERATIVE_SCHUR,        SUITE_SPARSE, kUserOrdering,      SCHUR_JACOBI);
 
 #ifndef CERES_NO_SUITESPARSE
-  CONFIGURE(ITERATIVE_SCHUR,        SUITE_SPARSE, kUserOrdering,      SCHUR_JACOBI);
+
   CONFIGURE(ITERATIVE_SCHUR,        SUITE_SPARSE, kUserOrdering,      CLUSTER_JACOBI);
   CONFIGURE(ITERATIVE_SCHUR,        SUITE_SPARSE, kUserOrdering,      CLUSTER_TRIDIAGONAL);
 #endif  // CERES_NO_SUITESPARSE
 
   CONFIGURE(ITERATIVE_SCHUR,        SUITE_SPARSE, kAutomaticOrdering, JACOBI);
+  CONFIGURE(ITERATIVE_SCHUR,        SUITE_SPARSE, kAutomaticOrdering, SCHUR_JACOBI);
 
 #ifndef CERES_NO_SUITESPARSE
-  CONFIGURE(ITERATIVE_SCHUR,        SUITE_SPARSE, kAutomaticOrdering, SCHUR_JACOBI);
+
   CONFIGURE(ITERATIVE_SCHUR,        SUITE_SPARSE, kAutomaticOrdering, CLUSTER_JACOBI);
   CONFIGURE(ITERATIVE_SCHUR,        SUITE_SPARSE, kAutomaticOrdering, CLUSTER_TRIDIAGONAL);
 #endif  // CERES_NO_SUITESPARSE
